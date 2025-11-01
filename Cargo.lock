@@ -201,6 +201,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "deno_task_shell",
+ "jsonc-parser",
  "serde_json",
  "tokio",
 ]
@@ -428,6 +429,15 @@ name = "itoa"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
+
+[[package]]
+name = "jsonc-parser"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ec4ac49f13c7b00f435f8a5bb55d725705e2cf620df35a5859321595102eb7e"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "junction"

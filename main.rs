@@ -2,6 +2,7 @@ use clap::Parser;
 use deno_task_shell::{
     KillSignal, ShellPipeReader, ShellPipeWriter, ShellState, execute_with_pipes, parser::parse,
 };
+use jsonc_parser::parse_to_serde_value;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -80,69 +81,16 @@ fn load_deno_config() -> Result<Value, String> {
             let content = fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read {}: {}", filename, e))?;
 
-            // Remove comments from jsonc
-            let json_str = if filename.ends_with(".jsonc") {
-                remove_json_comments(&content)
-            } else {
-                content
-            };
+            // Parse using jsonc-parser with serde feature to get serde_json::Value directly
+            let value = parse_to_serde_value(&content, &Default::default())
+                .map_err(|e| format!("Failed to parse {}: {}", filename, e))?
+                .ok_or_else(|| format!("Empty file: {}", filename))?;
 
-            return serde_json::from_str(&json_str)
-                .map_err(|e| format!("Failed to parse {}: {}", filename, e));
+            return Ok(value);
         }
     }
 
     Err("Neither deno.json nor deno.jsonc found in current directory".to_string())
-}
-
-/// Remove single-line and multi-line comments from JSON
-fn remove_json_comments(content: &str) -> String {
-    let mut result = String::new();
-    let chars: Vec<char> = content.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        if i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '/' {
-            // Skip single-line comment
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            if i < chars.len() {
-                result.push('\n');
-                i += 1;
-            }
-        } else if i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '*' {
-            // Skip multi-line comment
-            i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                if chars[i] == '\n' {
-                    result.push('\n');
-                }
-                i += 1;
-            }
-            if i + 1 < chars.len() {
-                i += 2; // Skip */
-            }
-        } else if chars[i] == '"' {
-            // Handle strings (don't remove comments inside strings)
-            result.push(chars[i]);
-            i += 1;
-            while i < chars.len() {
-                if chars[i] == '"' && (i == 0 || chars[i - 1] != '\\') {
-                    result.push(chars[i]);
-                    i += 1;
-                    break;
-                }
-                result.push(chars[i]);
-                i += 1;
-            }
-        } else {
-            result.push(chars[i]);
-            i += 1;
-        }
-    }
-
-    result
 }
 
 /// Parse tasks from deno.json config
