@@ -1,20 +1,22 @@
 use clap::Parser;
+use colored::Colorize;
+use deno_config::deno_json::ConfigFile;
 use deno_task_shell::{
     KillSignal, ShellPipeReader, ShellPipeWriter, ShellState, execute_with_pipes, parser::parse,
 };
-use jsonc_parser::parse_to_serde_value;
-use serde_json::Value;
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
+use url::Url;
 
 #[derive(Parser, Debug)]
 #[command(name = "dtask")]
-#[command(about = "Execute tasks defined in deno.json/deno.jsonc", long_about = None)]
+#[command(about = "Execute tasks defined in deno.json/deno.jsonc")]
 struct Args {
-    /// Task name to execute
-    task: String,
+    /// Task name to execute (omit to list available tasks)
+    task: Option<String>,
 
     /// Additional arguments to pass to the task
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -25,44 +27,47 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    // Load deno.json/deno.jsonc
+    // Load and parse deno.json/deno.jsonc
     match load_deno_config() {
-        Ok(config) => {
-            // Extract tasks
-            match parse_tasks(&config) {
-                Ok(tasks) => {
-                    // Find the requested task
-                    if let Some(command) = tasks.get(&args.task) {
-                        // Build final command with extra arguments
-                        let final_command = if args.args.is_empty() {
-                            command.clone()
-                        } else {
-                            format!("{} {}", command, args.args.join(" "))
-                        };
+        Ok(tasks) => {
+            // If no task specified, show available tasks
+            if args.task.is_none() {
+                println!("{}", "Available tasks:".green());
+                for (name, command) in &tasks {
+                    println!("- {}", name.cyan());
+                    println!("    {}", command);
+                }
+                return;
+            }
 
-                        // Execute the task
-                        match execute_task(&final_command).await {
-                            Ok(status) => {
-                                std::process::exit(status);
-                            }
-                            Err(e) => {
-                                eprintln!("Error executing task '{}': {}", args.task, e);
-                                std::process::exit(1);
-                            }
-                        }
-                    } else {
-                        eprintln!("Task '{}' not found in deno.json/deno.jsonc", args.task);
-                        eprintln!(
-                            "Available tasks: {}",
-                            tasks.keys().cloned().collect::<Vec<_>>().join(", ")
-                        );
+            let task_name = args.task.unwrap();
+            // Find the requested task
+            if let Some(command) = tasks.get(&task_name) {
+                // Build final command with extra arguments
+                let final_command = if args.args.is_empty() {
+                    command.clone()
+                } else {
+                    format!("{} {}", command, args.args.join(" "))
+                };
+
+                // Execute the task
+                match execute_task(&final_command).await {
+                    Ok(status) => {
+                        std::process::exit(status);
+                    }
+                    Err(e) => {
+                        eprintln!("Error executing task '{}': {}", task_name, e);
                         std::process::exit(1);
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error parsing tasks: {}", e);
-                    std::process::exit(1);
+            } else {
+                eprintln!("Task not found: {}", task_name);
+                eprintln!("{}", "Available tasks:".green());
+                for (name, command) in &tasks {
+                    eprintln!("- {}", name.cyan());
+                    eprintln!("    {}", command);
                 }
+                std::process::exit(1);
             }
         }
         Err(e) => {
@@ -72,8 +77,8 @@ async fn main() {
     }
 }
 
-/// Load deno.json or deno.jsonc file
-fn load_deno_config() -> Result<Value, String> {
+/// Load deno.json or deno.jsonc file and extract tasks with insertion order preserved
+fn load_deno_config() -> Result<IndexMap<String, String>, String> {
     // Check for deno.json first, then deno.jsonc
     for filename in &["deno.json", "deno.jsonc"] {
         let path = Path::new(filename);
@@ -81,42 +86,38 @@ fn load_deno_config() -> Result<Value, String> {
             let content = fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read {}: {}", filename, e))?;
 
-            // Parse using jsonc-parser with serde feature to get serde_json::Value directly
-            let value = parse_to_serde_value(&content, &Default::default())
-                .map_err(|e| format!("Failed to parse {}: {}", filename, e))?
-                .ok_or_else(|| format!("Empty file: {}", filename))?;
+            // Parse using ConfigFile from deno_config
+            let specifier = Url::from_file_path(std::env::current_dir().unwrap().join(filename))
+                .map_err(|_| "Failed to create URL specifier".to_string())?;
 
-            return Ok(value);
+            let config = ConfigFile::new(&content, specifier)
+                .map_err(|e| format!("Failed to parse {}: {}", filename, e))?;
+
+            // Extract tasks using deno_config's proper API
+            let tasks_config = config
+                .to_tasks_config()
+                .map_err(|e| format!("Failed to extract tasks: {}", e))?;
+
+            match tasks_config {
+                Some(tasks) => {
+                    // Convert TaskDefinition to simple String commands
+                    let mut result = IndexMap::new();
+                    for (name, task_def) in tasks {
+                        if let Some(command) = task_def.command {
+                            result.insert(name, command);
+                        }
+                    }
+                    if result.is_empty() {
+                        return Err("No tasks defined in deno.json/deno.jsonc".to_string());
+                    }
+                    return Ok(result);
+                }
+                None => continue,
+            }
         }
     }
 
     Err("Neither deno.json nor deno.jsonc found in current directory".to_string())
-}
-
-/// Parse tasks from deno.json config
-fn parse_tasks(config: &Value) -> Result<std::collections::HashMap<String, String>, String> {
-    let mut tasks = std::collections::HashMap::new();
-
-    if let Some(tasks_obj) = config.get("tasks") {
-        if let Some(tasks_map) = tasks_obj.as_object() {
-            for (name, value) in tasks_map {
-                if let Some(command) = value.as_str() {
-                    tasks.insert(name.clone(), command.to_string());
-                } else {
-                    return Err(format!(
-                        "Task '{}' is not a string. Tasks must be strings.",
-                        name
-                    ));
-                }
-            }
-        } else {
-            return Err("'tasks' field must be an object".to_string());
-        }
-    } else {
-        return Err("No 'tasks' field found in deno.json/deno.jsonc".to_string());
-    }
-
-    Ok(tasks)
 }
 
 /// Execute a task command using deno_task_shell
